@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <TMCStepper.h>
+#include <AccelStepper.h>
 
 #define EN_PIN 25
 #define DIR_PIN 26
@@ -11,18 +12,25 @@
 #define DRIVER_ADDRESS 0b00
 #define R_SENSE 0.11f
 
-constexpr int MOTOR_FULL_STEPS_PER_REV = 200;  // 1.8 degree motor
+constexpr int MOTOR_FULL_STEPS_PER_REV = 200;   // 1.8 degree motor
 constexpr int MICROSTEPS = 16;
-constexpr float GEAR_RATIO = 20.0f;  // 20 motor turns for 1 output turn
-constexpr uint16_t MOTOR_CURRENT_MA = 1200;
-constexpr int STEP_HIGH_US = 20;
-constexpr int STEP_LOW_US = 500;
+constexpr float GEAR_RATIO = 20.0f;             // 20 motor turns for 1 output turn
+constexpr uint16_t MOTOR_CURRENT_MA = 1600;
+
 constexpr float MIN_INPUT_ANGLE_DEG = -360.0f;
 constexpr float MAX_INPUT_ANGLE_DEG = 360.0f;
 constexpr size_t INPUT_BUFFER_SIZE = 32;
 
+// Motion tuning
+constexpr float MAX_SPEED_STEPS_PER_SEC = 12000.0f;
+constexpr float ACCEL_STEPS_PER_SEC2   = 6000.0f;
+
 HardwareSerial TMCSerial(2);
 TMC2209Stepper driver(&TMCSerial, R_SENSE, DRIVER_ADDRESS);
+
+// DRIVER mode = STEP + DIR pins
+AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
+
 char inputBuffer[INPUT_BUFFER_SIZE];
 size_t inputLen = 0;
 
@@ -32,44 +40,41 @@ long angleToSteps(float angleDeg) {
   return lroundf(fabsf(angleDeg) * stepsPerDegree);
 }
 
-void pulseStep() {
-  digitalWrite(STEP_PIN, HIGH);
-  delayMicroseconds(STEP_HIGH_US);
-  digitalWrite(STEP_PIN, LOW);
-  delayMicroseconds(STEP_LOW_US);
-}
-
-void moveSteps(long steps, bool direction) {
-  digitalWrite(DIR_PIN, direction ? HIGH : LOW);
-  delay(5);
-
-  Serial.print("Direction: ");
-  Serial.print(direction ? "HIGH" : "LOW");
-  Serial.print(" | Steps: ");
-  Serial.println(steps);
-
-  for (long i = 0; i < steps; i++) {
-    pulseStep();
-  }
-}
-
-void moveAngle(float angleDeg) {
-  const bool direction = angleDeg >= 0.0f;
-  const long steps = angleToSteps(angleDeg);
-
-  Serial.print("Commanded output angle: ");
-  Serial.print(angleDeg);
-  Serial.print(" deg | Gear ratio: ");
-  Serial.print(GEAR_RATIO);
-  Serial.print(":1 | Calculated motor steps: ");
-  Serial.println(steps);
-
-  moveSteps(steps, direction);
-}
-
 void printPrompt() {
   Serial.println();
   Serial.println("Enter angle from -360 to 360, then press Enter:");
+}
+
+void moveAngleWithRamp(float angleDeg) {
+  const bool direction = angleDeg >= 0.0f;
+  const long steps = angleToSteps(angleDeg);
+
+  if (steps <= 0) {
+    Serial.println("Calculated 0 steps. Nothing to move.");
+    return;
+  }
+
+  // Set target relative to current position
+  long move = direction ? steps : -steps;
+
+  Serial.print("Commanded output angle: ");
+  Serial.print(angleDeg);
+  Serial.print(" deg | Calculated motor steps: ");
+  Serial.println(steps);
+
+  Serial.print("Max speed (steps/s): ");
+  Serial.println(MAX_SPEED_STEPS_PER_SEC);
+
+  Serial.print("Acceleration (steps/s^2): ");
+  Serial.println(ACCEL_STEPS_PER_SEC2);
+
+  stepper.move(move);
+
+  while (stepper.distanceToGo() != 0) {
+    stepper.run();
+  }
+
+  Serial.println("Move complete.");
 }
 
 void handleAngleCommand(float angleDeg) {
@@ -85,7 +90,7 @@ void handleAngleCommand(float angleDeg) {
     return;
   }
 
-  moveAngle(angleDeg);
+  moveAngleWithRamp(angleDeg);
   printPrompt();
 }
 
@@ -158,9 +163,23 @@ void setupDriver() {
   driver.rms_current(MOTOR_CURRENT_MA);
   driver.microsteps(MICROSTEPS);
   driver.en_spreadCycle(true);
+
+  // Optional hold/run current tuning
   driver.ihold(16);
   driver.irun(24);
   driver.iholddelay(8);
+}
+
+void setupMotion() {
+  stepper.setEnablePin(EN_PIN);
+  stepper.setPinsInverted(false, false, true); // enable is active LOW
+  stepper.enableOutputs();
+
+  stepper.setMaxSpeed(MAX_SPEED_STEPS_PER_SEC);
+  stepper.setAcceleration(ACCEL_STEPS_PER_SEC2);
+
+  // Optional: ensures current position starts at zero
+  stepper.setCurrentPosition(0);
 }
 
 void setup() {
@@ -177,9 +196,10 @@ void setup() {
 
   setupDriver();
   delay(100);
+  setupMotion();
 
   Serial.println();
-  Serial.println("TMC2209 STEP/DIR interactive angle control");
+  Serial.println("TMC2209 STEP/DIR interactive angle control with acceleration ramp");
   Serial.print("STEP pin: ");
   Serial.println(STEP_PIN);
   Serial.print("DIR pin: ");
@@ -192,6 +212,11 @@ void setup() {
   Serial.println(GEAR_RATIO);
   Serial.print("Current mA RMS: ");
   Serial.println(MOTOR_CURRENT_MA);
+  Serial.print("Max speed (steps/s): ");
+  Serial.println(MAX_SPEED_STEPS_PER_SEC);
+  Serial.print("Acceleration (steps/s^2): ");
+  Serial.println(ACCEL_STEPS_PER_SEC2);
+
   printPrompt();
 }
 
